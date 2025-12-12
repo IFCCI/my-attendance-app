@@ -8,8 +8,8 @@ import time
 SESSION_PASSCODES = {
     "13th Dec - Morning Session": "146865",    # <-- 修改这里的密码
     "13th Dec - Afternoon Session": "978654",  # <-- 修改这里的密码
-    "14th Dec - Morning Session": "102556",    # <-- 修改这里的密码
-    "14th Dec - Afternoon Session": "125478"   # <-- 修改这里的密码
+    "14th Dec - Morning Session": "015563",    # <-- 修改这里的密码
+    "14th Dec - Afternoon Session": "215478"   # <-- 修改这里的密码
 }
 
 # --- 页面配置 ---
@@ -135,4 +135,5 @@ with tab2:
             else:
                 full_phone = f"{country_code} {phone_num}"
                 write_log(selected_session, wi_name, "Walk-in", wi_email, full_phone)
+
 
