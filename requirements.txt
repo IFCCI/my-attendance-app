@@ -1,1 +1,1 @@
-st-gsheets
+st-gsheets-connection
