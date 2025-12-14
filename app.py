@@ -5,189 +5,174 @@ from datetime import datetime
 import time
 import os
 
-# --- 🔐 设置每个场次的 6 位密码 ---
+# --- 🔐 密码设置 ---
 SESSION_PASSCODES = {
     "13th Dec - Morning Session": "146865",    
     "13th Dec - Afternoon Session": "978654",  
     "14th Dec - Morning Session": "015563",    
     "14th Dec - Afternoon Session": "215478"   
 }
-
-# --- 🔐 管理员密码 ---
 ADMIN_PASSWORD = "happy4640"
 BACKUP_FILE = "local_backup_logs.csv"
+OFFLINE_MODE = False
 
-# --- 页面配置 ---
-st.set_page_config(page_title="Event Check-in", page_icon="✅", layout="wide")
-
-# --- 连接 Google Sheets ---
+st.set_page_config(page_title="Check-in", page_icon="✅", layout="wide")
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- 🚀 缓存读取功能 ---
+# --- 🚀 缓存读取名单 (适配 2 Column) ---
 @st.cache_data(ttl=600) 
-def get_participants():
+def get_participants_data():
     try:
-        df = conn.read(worksheet="Participants", usecols=[0])
-        return df['Name'].dropna().tolist()
-    except Exception:
-        return []
+        # 只读取前两列: Name, Category
+        df = conn.read(worksheet="Participants", usecols=[0, 1])
+        
+        # 强制命名列名，防止出错
+        if len(df.columns) >= 2:
+            df.columns = ['Name', 'Category']
+        else:
+            df.columns = ['Name']
+            df['Category'] = 'Pre-registered' # 默认值
+            
+        # 变成字符串并去空
+        return df.dropna(subset=['Name']).astype(str)
+    except:
+        return pd.DataFrame(columns=['Name', 'Category'])
 
-# --- 💾 写入数据函数 (双重备份) ---
+# --- 📊 实时读取 Log ---
+@st.cache_data(ttl=30)
+def get_live_logs():
+    try:
+        return conn.read(worksheet="Logs", ttl=0)
+    except:
+        if os.path.exists(BACKUP_FILE):
+            return pd.read_csv(BACKUP_FILE)
+        return pd.DataFrame()
+
+# --- 写入数据函数 ---
 def write_log(session, name, user_type, email="-", phone="-"):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    new_data = pd.DataFrame([{
+        "Timestamp": timestamp, "Session": session, "Name": name, 
+        "Type": user_type, "Email": email, "Phone": phone
+    }])
     
-    # 准备数据
-    new_data = {
-        "Timestamp": timestamp,
-        "Session": session,
-        "Name": name,
-        "Type": user_type,
-        "Email": email,
-        "Phone": phone
-    }
-    df_new = pd.DataFrame([new_data])
-    
-    # === 1. 本地 CSV 备份 (秒级写入，不受 API 限制) ===
-    try:
-        if not os.path.exists(BACKUP_FILE):
-            df_new.to_csv(BACKUP_FILE, index=False)
-        else:
-            df_new.to_csv(BACKUP_FILE, mode='a', header=False, index=False)
-    except Exception as e:
-        st.error(f"Local Backup Failed: {e}")
-
-    # === 2. Google Sheets 写入 (带重试机制) ===
-    # 即使 Google 失败了，本地 CSV 已经存下来了，所以不用太担心
-    max_retries = 3
-    google_success = False
-    
-    for attempt in range(max_retries):
-        try:
-            try:
-                existing_data = conn.read(worksheet="Logs", ttl=0)
-                updated_df = pd.concat([existing_data, df_new], ignore_index=True)
-            except:
-                updated_df = df_new
-            
-            conn.update(worksheet="Logs", data=updated_df)
-            google_success = True
-            break # 成功则跳出循环
-        except Exception:
-            time.sleep(1) # 失败重试
-    
-    # === 3. 反馈结果 ===
-    if google_success:
-        st.success(f"✅ {name} 签到成功! (Saved to Cloud)")
-        st.balloons()
+    # 本地备份
+    if not os.path.exists(BACKUP_FILE):
+        new_data.to_csv(BACKUP_FILE, index=False)
     else:
-        # 如果 Google 失败但本地成功
-        st.warning(f"⚠️ {name} 签到已保存到本地备份，但同步 Google 失败。数据是安全的！")
-        st.info("Saved to Local Backup only due to network congestion.")
+        new_data.to_csv(BACKUP_FILE, mode='a', header=False, index=False)
+
+    if OFFLINE_MODE:
+        st.success(f"✅ {name} 签到成功! (Offline)")
+        time.sleep(1.5)
+        st.rerun()
+        return
+
+    try:
+        existing_data = conn.read(worksheet="Logs", ttl=0)
+        updated_df = pd.concat([existing_data, new_data], ignore_index=True)
+        conn.update(worksheet="Logs", data=updated_df)
+        st.success(f"✅ {name} 签到成功!")
+        st.balloons()
+    except Exception:
+        st.warning(f"⚠️ 已存入本地备份 (Google忙碌)，数据安全。")
     
     time.sleep(2)
-    st.cache_data.clear()
     st.rerun()
 
-# ==========================================
-# 🔧 Sidebar: Admin Dashboard (管理员后台)
-# ==========================================
+# ================= ADMIN 后台 =================
 with st.sidebar:
-    st.header("🔐 Admin Access")
-    pwd = st.text_input("Enter Admin Password", type="password")
-    
-    if pwd == ADMIN_PASSWORD:
-        st.success("Access Granted")
-        st.divider()
-        
-        st.subheader("📂 Local Backup (Emergency)")
-        st.info("如果 Google Sheet 挂了，请下载这个文件。")
-        
+    st.header("🔐 Admin")
+    if st.text_input("Pwd", type="password") == ADMIN_PASSWORD:
+        st.success("Unlocked")
         if os.path.exists(BACKUP_FILE):
             df_local = pd.read_csv(BACKUP_FILE)
-            st.write(f"Total Records: {len(df_local)}")
-            # 下载按钮
-            st.download_button(
-                label="📥 Download CSV Backup",
-                data=df_local.to_csv(index=False).encode('utf-8'),
-                file_name=f"attendance_backup_{datetime.now().strftime('%H%M')}.csv",
-                mime="text/csv"
-            )
-            with st.expander("View Local Data"):
-                st.dataframe(df_local)
-        else:
-            st.write("No local records yet.")
-            
-        st.divider()
-        st.subheader("☁️ Google Sheets Data")
-        if st.button("🔄 Refresh Cloud Data"):
-            try:
-                df_cloud = conn.read(worksheet="Logs", ttl=0)
-                st.dataframe(df_cloud)
-            except:
-                st.error("Cannot connect to Google Sheets.")
+            st.write(f"📊 本地记录: {len(df_local)} 条")
+            st.download_button("📥 下载 CSV 备份", df_local.to_csv(index=False), "backup.csv")
+            if st.button("☁️ 同步到 Google"):
+                try:
+                    existing = conn.read(worksheet="Logs", ttl=0)
+                    combined = pd.concat([existing, df_local]).drop_duplicates(subset=['Timestamp', 'Name'])
+                    conn.update(worksheet="Logs", data=combined)
+                    st.success("同步成功！")
+                except: st.error("同步失败")
 
-# ==========================================
-# 🏠 Main Page (用户界面)
-# ==========================================
-
+# ================= 主界面 =================
 st.title("🎓 Diploma in Financial Market Analysis")
-st.subheader("Third In-Person Class | Attendance Check-in")
 
-# --- 选择场次 & 输入密码 ---
 sessions = list(SESSION_PASSCODES.keys())
-selected_session = st.selectbox("📅 Select Current Session (请选择当前场次)", sessions)
-entered_code = st.text_input("🔑 Enter Session Code (请输入6位场次代码)", type="password")
+selected_session = st.selectbox("📅 Session", sessions)
+entered_code = st.text_input("🔑 Code", type="password")
 
 st.divider()
+tab1, tab2 = st.tabs(["🔍 Search Name", "📝 Walk-in Form"])
 
-# --- 主要逻辑 ---
-tab1, tab2 = st.tabs(["🔍 已报名 (Pre-registered)", "📝 现场报名 (Walk-in)"])
-
-# === TAB 1: 已报名用户 ===
+# === TAB 1: 搜索名单 (CFT / RSVP) ===
 with tab1:
-    st.info("如果您已经报名，请在下方搜索您的名字。")
-    name_list = get_participants()
+    st.info("已在名单内的 (包含 CFT / RSVP) 请在此搜索 / Search your name here")
     
-    if not name_list:
-        st.warning("⚠️ 暂时无法加载名单，请尝试直接使用'现场报名' (Walk-in)。")
+    df_participants = get_participants_data()
     
-    selected_name = st.selectbox("🔍 Search your name (搜索姓名)", [""] + name_list)
+    # 自动去重逻辑
+    if not df_participants.empty:
+        unique_names = sorted(df_participants['Name'].unique().tolist())
+    else:
+        unique_names = []
+    
+    selected_name = st.selectbox("Name", [""] + unique_names)
     
     if selected_name:
-        st.write(f"**Selected:** {selected_name}")
-        if st.button("Confirm Check-in (确认签到)", key="btn_pre"):
-            correct_code = SESSION_PASSCODES.get(selected_session)
-            if entered_code == correct_code:
-                write_log(selected_session, selected_name, "Pre-registered")
-            else:
-                st.error("❌ 场次代码错误 (Invalid Session Code)！")
+        # 抓取用户对应的类别 (CFT 或 RSVP)
+        user_row = df_participants[df_participants['Name'] == selected_name]
+        
+        if not user_row.empty:
+            # 直接读取 B 列的内容
+            cat = user_row.iloc[0]['Category']
+            st.write(f"**Category:** `{cat}`")
+            final_type_label = cat 
+        else:
+            final_type_label = "Pre-registered"
 
-# === TAB 2: 未报名用户 ===
-with tab2:
-    st.warning("如果您未在名单中，请填写以下信息。")
-    with st.form("walk_in_form"):
-        wi_name = st.text_input("Full Name as per IC (姓名)*")
-        wi_email = st.text_input("Email (邮箱)*")
-        
-        st.write("Contact Number (联络号码)*")
-        c1, c2 = st.columns([1, 3])
-        with c1:
-            country_code = st.selectbox("Code", ["+60", "+65", "+86", "+1", "+44", "+61", "Other"])
-        with c2:
-            phone_num = st.text_input("Number (e.g. 123456789)")
-            
-        submitted = st.form_submit_button("Submit & Check-in")
-        
-        if submitted:
-            correct_code = SESSION_PASSCODES.get(selected_session)
-            if entered_code != correct_code:
-                st.error("❌ 场次代码错误 (Invalid Session Code)！")
-            elif not (wi_name and wi_email and phone_num):
-                st.error("⚠️ 请填写所有必填项 (Please fill in all fields).")
-            elif "@" not in wi_email or "." not in wi_email:
-                st.error("⚠️ Email 格式不正确 (Invalid Email format).")
-            elif not phone_num.replace(" ", "").isnumeric():
-                st.error("⚠️ 电话号码只能包含数字 (Phone number should only contain digits).")
+        if st.button("Confirm Check-in", key="btn_pre"):
+            if entered_code == SESSION_PASSCODES.get(selected_session):
+                write_log(selected_session, selected_name, final_type_label)
             else:
-                full_phone = f"{country_code} {phone_num}"
-                write_log(selected_session, wi_name, "Walk-in", wi_email, full_phone)
+                st.error("❌ Code Error")
+
+# === TAB 2: Walk-in ===
+with tab2:
+    st.warning("名单里没有名字的请填此表 / Fill this if your name is NOT in the list")
+    with st.form("wi"):
+        wn = st.text_input("Name")
+        we = st.text_input("Email")
+        c1, c2 = st.columns([1,3])
+        wc = c1.selectbox("Code", ["+60","+65","+86","+1","+44","Other"])
+        wp = c2.text_input("Phone")
+        if st.form_submit_button("Submit"):
+            if entered_code != SESSION_PASSCODES.get(selected_session):
+                st.error("❌ Code Error")
+            elif not (wn and we and wp):
+                st.error("⚠️ Fill all fields")
+            else:
+                write_log(selected_session, wn, "Walk-in Guest", we, f"{wc} {wp}")
+
+# ================= 底部实时列表 =================
+st.divider()
+st.subheader("📋 Live Check-in Status (Latest 10)")
+st.caption(f"Showing records for: {selected_session}")
+
+df_logs = get_live_logs()
+if not df_logs.empty:
+    if 'Session' in df_logs.columns and 'Timestamp' in df_logs.columns:
+        current_session_logs = df_logs[df_logs['Session'] == selected_session].copy()
+        if not current_session_logs.empty:
+            current_session_logs = current_session_logs.sort_values(by="Timestamp", ascending=False)
+            display_df = current_session_logs[['Timestamp', 'Name', 'Type']].head(10)
+            st.dataframe(display_df, hide_index=True, use_container_width=True)
+            st.caption("Auto-refreshes every 30 seconds.")
+        else:
+            st.info("No check-ins yet for this session.")
+    else:
+        st.info("Logs data structure updating...")
+else:
+    st.info("Loading logs...")
